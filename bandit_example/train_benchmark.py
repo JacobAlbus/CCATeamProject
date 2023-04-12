@@ -22,7 +22,7 @@ class Policy(nn.Module):
         self.hidden_size = 128
         self.double()
 
-        self.input_layer = nn.Linear(FEEDBACK_DIM + 1, self.hidden_size)
+        self.input_layer = nn.Linear(FEEDBACK_DIM + 1, self.hidden_size)  # + 1 for the context
         self.relu1 = nn.ReLU()
         self.hidden_layer1 = nn.Linear(self.hidden_size, ACTION_DIM)
         self.softmax = nn.Softmax(dim=0)
@@ -40,7 +40,7 @@ class VFA(nn.Module):
         self.hidden_size = 128
         self.double()
 
-        self.input_layer = nn.Linear(FEEDBACK_DIM + 1, self.hidden_size)
+        self.input_layer = nn.Linear(FEEDBACK_DIM + 1, self.hidden_size) # + 1 for the context
         self.relu1 = nn.ReLU()
         self.hidden_layer1 = nn.Linear(self.hidden_size, 1)
 
@@ -53,13 +53,17 @@ def select_action(state, vfa_model, policy_model):
     action_prob_dist = policy_model(state)
     state_value = vfa_model(state)
 
+    # The current problem is that after training for only 1 minute,
+    # the policy model starts producing probability distributions with Nan values
+    # or with 100% probability for a wrong option. Perhaps there's a problem with the
+    # bandit environment code.
     try:
         N = int((ACTION_DIM - 1) / 2)
         actions = np.array([num for num in range(-N, N+1)])
         action = np.random.choice(actions, p=action_prob_dist.data.numpy())
     except ValueError:
         print(action_prob_dist, state)
-        exit("NAN PROBABLITIY")
+        exit("NAN PROBABLITIY") 
 
     action_prob = action_prob_dist[action]
     
@@ -74,15 +78,19 @@ def calculate_loss(rewards, saved_steps, gamma=0.999):
         R = r + gamma * R
         returns.insert(0, R)
     returns = torch.tensor(returns)
-    returns_mean = -16.5 # because we only sample a single episode, 
-    returns_std = 19.438 # I manually calculated the true mean and std of the returns
-    returns = (returns - returns_mean) / (returns_std + eps)
+
+    if len(rewards) == 1:
+        # Because we only sample a single episode, I manually calculated the true mean and std of the returns
+        returns_mean = -16.5 
+        returns_std = 19.438 
+        returns = (returns - returns_mean) / (returns_std + eps)
+    else:
+        returns = (returns - returns.mean()) / (returns.std() + eps)
     
     state_values = torch.stack([values for (log_prob, values) in saved_steps]).squeeze()
     action_probs = torch.stack([log_prob for (log_prob, values) in saved_steps])
 
-    with torch.no_grad():
-        estimator = returns - state_values
+    estimator = returns
 
     policy_losses = -torch.sum(action_probs * estimator)
     value_losses = torch.sum((state_values - estimator)**2)
