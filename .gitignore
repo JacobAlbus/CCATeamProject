@@ -1,0 +1,2 @@
+*.pyc
+/bandit_example/__pycache__
