@@ -3,14 +3,14 @@ import matplotlib.pyplot as plt
 import torch
 
 class Bandit():
-   def __init__(self, K=20, N=100, variance=10):
+   def __init__(self, K=20, N=100, variance=10, seed=1):
       self.K = K
       self.N = N
       self.ACTION_DIM = int((2 * N) + 1)
       self.prev_context = None
       self.variance = variance
 
-      np.random.seed(1)
+      np.random.seed(seed)
       self.U = np.random.randn(K, self.ACTION_DIM)
       self.V = np.random.randn(K, self.ACTION_DIM)
       self.W = np.random.randn(K, 1)
@@ -26,7 +26,7 @@ class Bandit():
          return self.U[:, self.selection_index(context)]
 
 
-   def init(self, feedback_type):
+   def reset(self, feedback_type):
       C = np.random.choice(self.number_range)
       random_action = np.random.choice(self.number_range)
       epsilon = np.random.normal(loc=0, scale=self.variance)
@@ -52,10 +52,10 @@ class Bandit():
 
       return next_state, reward, done
 
-   def reset(self):
-      self.U = np.random.randn(self.K, self.N)
-      self.V = np.random.randn(self.K, self.N)
-      self.W = np.random.randn(self.K, self.N)
+   # def reset(self):
+   #    self.U = np.random.randn(self.K, self.N)
+   #    self.V = np.random.randn(self.K, self.N)
+   #    self.W = np.random.randn(self.K, self.N)
 
     
 
