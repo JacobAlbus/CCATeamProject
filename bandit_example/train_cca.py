@@ -1,156 +1,162 @@
-from bandit_example.bandit import Bandit
-from gru import GRUNet
+from bandit import Bandit
+from models import GRUNet, VFA, Policy, HindsightClassifier
 
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch.distributions import Categorical
+from collections import namedtuple
 import torch.optim as optim
-import torch.optim.lr_scheduler as Scheduler
 
-# class Policy(nn.Module):
-#     """
-#         Implement both policy network and the value network in one model
-#         - Note that here we let the actor and value networks share the first layer
-#         - Feel free to change the architecture (e.g. number of hidden layers and the width of each hidden layer) as you like
-#         - Feel free to add any member variables/functions whenever needed
-#         TODO:
-#             1. Initialize the network (including the GAE parameters, shared layer(s), the action layer(s), and the value layer(s))
-#             2. Random weight initialization of each layer
-#     """
-#     def __init__(self):
-#         super(Policy, self).__init__()
+SavedAction = namedtuple('SavedAction', ['policy_log_prob', 'value', 'hindsight_log_prob'])
+
+class ModelHolder():
+    def __init__(self, env, hidden_size=32, lr_hs=0.001, lr_im=0.001, lr_sup=0.001):
+        FEEDBACK_DIM = env.K
+        HINDSIGHT_DIM = FEEDBACK_DIM
+        HIDDEN_SIZE = hidden_size
         
-#         # Extract the dimensionality of state and action spaces
-#         self.hidden_size = 128
-#         self.double()
+
+        self.saved_actions = []
+        self.rewards = []
+
+        # self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.device = torch.device("cpu")
+
+        self.hindsight_network = GRUNet(input_dim=FEEDBACK_DIM, hidden_dim=32, 
+                        output_dim=HINDSIGHT_DIM, n_layers=32, device=self.device).to(self.device)
+        self.hindsight_optimizer = optim.Adam(self.hindsight_network.parameters(), lr=lr_im)
         
-#         ########## YOUR CODE HERE (5~10 lines) ##########
-#         self.layer1 = nn.Linear(self.observation_dim, self.hidden_size)
-#         self.relu1 = nn.ReLU()
+        self.vfa = VFA(observation_dim=FEEDBACK_DIM + HINDSIGHT_DIM, hidden_size=HIDDEN_SIZE).to(self.device)
+        self.vfa_optimizer = optim.Adam(self.vfa.parameters(), lr=lr_hs)
 
-#         self.action_layer2 = nn.Linear(self.hidden_size, self.hidden_size)
-#         self.action_relu2 = nn.ReLU()
-#         self.action_layer3 = nn.Linear(self.hidden_size, self.action_dim)
-#         self.action_softmax = nn.Softmax(dim=0)
+        self.policy = Policy(observation_dim=1, hidden_size=HIDDEN_SIZE, action_dim=env.ACTION_DIM).to(self.device)
+        self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=lr_hs)
 
-#         self.value_layer2 = nn.Linear(self.hidden_size, self.hidden_size)
-#         self.value_relu2 = nn.ReLU()
-#         self.value_layer3 = nn.Linear(self.hidden_size, 1)
-#         ########## END OF YOUR CODE ##########
-        
-#         # action & reward memory
-#         self.saved_actions = []
-#         self.rewards = []
-
-#     def forward(self, state):
-#         """
-#             Forward pass of both policy and value networks
-#             - The input is the state, and the outputs are the corresponding 
-#               action probability distirbution and the state value
-#             TODO:
-#                 1. Implement the forward pass for both the action and the state value
-#         """
-        
-#         ########## YOUR CODE HERE (3~5 lines) ##########
-#         # calculate input layer
-#         state = torch.Tensor(state)
-#         output = self.layer1(state)
-#         output = self.relu1(output)
-
-#         # calculate policy network
-#         action_prob = self.action_layer2(output)
-#         action_prob = self.action_relu2(action_prob)
-#         action_prob = self.action_layer3(action_prob)
-#         action_prob = self.action_softmax(action_prob)
-
-#         # calculate vfa network
-#         state_value = self.value_layer2(output)
-#         state_value = self.value_relu2(state_value)
-#         state_value = self.value_layer3(state_value)
-#         ########## END OF YOUR CODE ##########
-        
-#         return action_prob, state_value
-
-#     def calculate_loss(self, rewards, gamma=0.999):
-#         """
-#             Calculate the loss (= policy loss + value loss) to perform backprop later
-#             TODO:
-#                 1. Calculate rewards-to-go required by REINFORCE with the help of self.rewards
-#                 2. Calculate the policy loss using the policy gradient
-#                 3. Calculate the value loss using either MSE loss or smooth L1 loss
-#         """
-        
-#         # Initialize the lists and variables
-#         R = 0
-#         saved_actions = self.saved_actions
-#         returns = []
-#         policy_losses = []
-#         value_losses = []
-#         eps = np.finfo(np.float32).eps.item()
-
-#         ########## YOUR CODE HERE (8-15 lines) ##########
-#         for r in rewards[::-1]:
-#             R = r + gamma * R
-#             returns.insert(0, R)
-
-#         returns = torch.tensor(returns)
-#         returns = (returns - returns.mean()) / (returns.std() + eps)
-        
-#         state_values = torch.stack([values for (log_prob, values) in saved_actions]).squeeze()
-#         action_probs = torch.stack([log_prob for (log_prob, values) in saved_actions])
-
-#         ### Uncomment for reinforce with baseline ###
-#         # estimator = returns - state_values         
-
-#         ### Uncomment for reinforce vanilla ###
-#         estimator = returns
-
-#         ### Uncomment for reinforce with GAE ###     
-#         policy_losses = -torch.sum(action_probs * estimator)
-#         value_losses = torch.sum((state_values - estimator)**2)
-#         ########## END OF YOUR CODE ##########
-
-#         return value_losses + policy_losses
-
-#     def clear_memory(self):
-#         # reset rewards and action buffer
-#         del self.rewards[:]
-#         del self.saved_actions[:]
-
-
-
-K = 20
-N = 10
-action_space = (2 * N) + 1
-variance = 10
-HINDSIGHT_SIZE = 5
-
-value_function = torch.nn.Sequential(torch.nn.Linear(K + 1, 1))
-policy_function = torch.nn.Sequential(torch.nn.Linear(K + 1, action_space))
-hindsight_function = GRUNet(input_dim=K, hidden_dim=32, output_dim=HINDSIGHT_SIZE, n_layers=32)
-hindsight_classifier = torch.nn.Sequential(
-                                torch.nn.Linear(HINDSIGHT_SIZE, 32),
-                                torch.nn.ReLU(),
-                                torch.nn.Linear(32, 32),
-                                torch.nn.ReLU(),
-                                torch.nn.Linear(32, action_space))
-
-env = Bandit(K=K, N=N, variance=variance)
-num_iterations = 100
-
-def forward_gru():
-
-feedback, context, reward, _ = env.init()
-for iterations in range(num_iterations):
+        self.hindsight_classifier = HindsightClassifier(observation_dim=FEEDBACK_DIM + HINDSIGHT_DIM, 
+                                                hidden_size=HIDDEN_SIZE, output_dim=env.ACTION_DIM).to(self.device)
+        self.hs_classifier_optimizer = optim.Adam(self.hindsight_classifier.parameters(), lr=lr_sup)
     
-    feedback_context = np.concatenate(feedback, np.array([context]))
+    def select_action(self, state, env):
+        # Use Policy P(a | s) to select action
+        X = torch.tensor(state, dtype=torch.float).unsqueeze(0)
+        action_prob_dist = self.policy(X)
+        action_prob_dist = Categorical(action_prob_dist)
+        action = action_prob_dist.sample()
 
-    action = policy_function(feedback_context)
-    value = value_function(feedback_context)
-    hindsight = hindsight_function(feedback)
+        # Calculate feedback vector and hindsight
+        feedback_vector = torch.from_numpy(env.calculate_feedback(action)).double()
+        h = self.hindsight_network.init_hidden(feedback_vector.shape[0])
+        hindsight = self.hindsight_network(feedback_vector, h)
 
-    fcb = hindsight_classifier(hindsight, feedback) # future conditional baseline
+        # Calculate state value using hindsight and feedback
+        hindsight_observation = torch.cat((hindsight, feedback_vector))
+        state_value = self.vfa(hindsight_observation)
 
-    loss = calculate_loss(reward, )
+        # Find probability of selected action under hindsight classifier P(a | s, psi)
+        hindsight_action_prob_dist = self.hindsight_classifier(hindsight_observation)
+        hindsight_action_prob_dist = Categorical(hindsight_action_prob_dist)
+        hindsight_log_prob = hindsight_action_prob_dist.log_prob(action)
+
+        self.saved_actions.append(SavedAction(action_prob_dist.log_prob(action), state_value, hindsight_log_prob))
+
+        return action.item()
+
+    def calculate_loss(self, gamma=0.99):
+        # Initialize the lists and variables
+        Gt = 0.0
+        saved_actions = self.saved_actions
+        hindsight_baseline_loss = []
+        hindsight_classifier_loss = []
+        action_independence_loss = []
+        policy_gradient_loss = []
+
+        for t in reversed(range(len(self.rewards))):
+            Gt = Gt * gamma + self.rewards[t]
+            policy_log_prob, state_value, hindsight_log_prob = saved_actions[t]
+            advantage = Gt - state_value.detach().item()
+
+            hindsight_baseline_loss.append((state_value[0] - Gt)**2)  # simple MSE loss
+            policy_gradient_loss.append(-policy_log_prob * advantage)
+
+            # NOTE: might need to sum over actions
+            action_independence_loss.append(policy_log_prob * (policy_log_prob - hindsight_log_prob)) 
+            hindsight_classifier_loss.append(-hindsight_log_prob)
+
+        hindsight_baseline_loss = torch.stack(hindsight_baseline_loss).sum()
+        hindsight_classifier_loss = torch.stack(hindsight_classifier_loss).sum()
+        action_independence_loss = torch.stack(action_independence_loss).sum()
+        policy_gradient_loss = torch.stack(policy_gradient_loss).sum()
+
+        return hindsight_baseline_loss, hindsight_classifier_loss, action_independence_loss, policy_gradient_loss
+
+
+    def clear_memory(self):
+        del self.rewards[:]
+        del self.saved_actions[:]
     
+    def update(self):
+        L_hs, L_sup, L_im, L_pg = self.calculate_loss()
+
+        # Optimize VFA (Hindsight Baseline Loss)
+        self.vfa_optimizer.zero_grad()
+        L_hs.backward()
+        self.vfa_optimizer.step()
+
+        # Optimize Hindsight Network (Independence Maximization Loss)
+        self.hindsight_optimizer.zero_grad()
+        L_im.backward()
+        self.hindsight_optimizer.step()
+
+        # Optimize Hindsight Classifier (Hindsight Predictor Loss)
+        self.hs_classifier_optimizer.zero_grad()
+        L_sup.backward()
+        self.hs_classifier_optimizer.step()
+
+        # Optimize Policy (Policy Gradient Loss)
+        self.policy_optimizer.zero_grad()
+        L_pg.backward()
+        self.policy_optimizer.step()
+
+        self.clear_memory()
+
+def train(env):
+    MAX_EPISODES = 100000
+    MAX_EPISODE_LENGTH = 1000
+    EWMA_MOVE = 0.0005
+    EWMA_THRESHOLD = -1
+
+    model = ModelHolder(env)
+    
+    for i_episode in range(MAX_EPISODES):
+        state = env.reset()
+        ep_reward = 0
+        done = False
+
+        for t in range(MAX_EPISODE_LENGTH):
+            action = model.select_action(state, env)
+            state, reward, done = env.step(action)
+            model.rewards.append(reward)
+            ep_reward += reward
+
+            if done:
+                break
+        
+        model.update()
+
+        # update EWMA reward and log the results
+        ewma_reward = EWMA_MOVE * ep_reward + (1 - EWMA_MOVE) * ewma_reward
+        if i_episode % 10 == 0:
+            print('Episode {}\treward: {}\t ewma reward: {}'.format(i_episode, ep_reward, ewma_reward))
+
+        if i_episode > 10000 and ewma_reward > EWMA_THRESHOLD:
+            print("Solved in Episode {}! Running reward is now {}!".format(i_episode, ewma_reward))
+            break
+    
+
+def main():
+    random_seed = 1
+    env = Bandit(K=20, N=10, variance=0.0, seed=random_seed)
+    torch.manual_seed(random_seed)
+    train(env)
+
+if __name__ == '__main__':
+    main()
