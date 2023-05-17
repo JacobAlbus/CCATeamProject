@@ -47,7 +47,7 @@ class HindsightClassifier(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, output_dim),
-            nn.Softmax(dim=1)
+            nn.Softmax(dim=-1)
     )
     def forward(self, input):
         action_dist = self.net(input)

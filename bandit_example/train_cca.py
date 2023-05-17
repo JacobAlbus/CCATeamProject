@@ -43,9 +43,11 @@ class ModelHolder():
         action = action_prob_dist.sample()
 
         # Calculate feedback vector and hindsight
-        feedback_vector = torch.from_numpy(env.calculate_feedback(action)).double()
-        h = self.hindsight_network.init_hidden(feedback_vector.shape[0])
-        hindsight = self.hindsight_network(feedback_vector, h)
+        feedback_vector = torch.from_numpy(env.calculate_feedback(action)).float()
+        # h = self.hindsight_network.init_hidden(feedback_vector.shape[0])
+        h = self.hindsight_network.init_hidden(batch_size=1)
+        hindsight, h = self.hindsight_network(feedback_vector.reshape((1, 1, feedback_vector.size(0))), h)
+        hindsight = hindsight.reshape(hindsight.size(1))
 
         # Calculate state value using hindsight and feedback
         hindsight_observation = torch.cat((hindsight, feedback_vector))
@@ -102,9 +104,11 @@ class ModelHolder():
         self.vfa_optimizer.step()
 
         # Optimize Hindsight Network (Independence Maximization Loss)
+        self.policy_optimizer.zero_grad()
         self.hindsight_optimizer.zero_grad()
         L_im.backward()
         self.hindsight_optimizer.step()
+        self.policy_optimizer.step()
 
         # Optimize Hindsight Classifier (Hindsight Predictor Loss)
         self.hs_classifier_optimizer.zero_grad()
