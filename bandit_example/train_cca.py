@@ -6,14 +6,14 @@ from torch.distributions import Categorical
 from collections import namedtuple
 import torch.optim as optim
 
-SavedAction = namedtuple('SavedAction', ['policy_log_prob', 'value', 'hindsight_log_prob'])
+SavedAction = namedtuple('SavedAction', ['value', 'action', 'policy_log_dist', 'hindsight_log_dist'])
 
 class ModelHolder():
     def __init__(self, env, hidden_size=32, lr_hs=0.001, lr_im=0.001, lr_sup=0.001):
         FEEDBACK_DIM = env.K
         HINDSIGHT_DIM = FEEDBACK_DIM
         HIDDEN_SIZE = hidden_size
-        
+        torch.autograd.set_detect_anomaly(True)
 
         self.saved_actions = []
         self.rewards = []
@@ -56,11 +56,32 @@ class ModelHolder():
         # Find probability of selected action under hindsight classifier P(a | s, psi)
         hindsight_action_prob_dist = self.hindsight_classifier(hindsight_observation)
         hindsight_action_prob_dist = Categorical(hindsight_action_prob_dist)
-        hindsight_log_prob = hindsight_action_prob_dist.log_prob(action)
+        # hindsight_log_prob = hindsight_action_prob_dist.log_prob(action)
 
-        self.saved_actions.append(SavedAction(action_prob_dist.log_prob(action), state_value, hindsight_log_prob))
+        self.saved_actions.append(SavedAction(state_value, action, action_prob_dist, hindsight_action_prob_dist))
 
         return action.item()
+    
+    def calculate_action_independence_loss(self, policy_action_dist, hindsight_action_dist):
+
+        loss = []
+        for action in policy_action_dist.enumerate_support():
+            policy_prob = policy_action_dist.probs[action.item()]
+            policy_log_prob = policy_action_dist.log_prob(action)
+            hindsight_log_prob = hindsight_action_dist.log_prob(action)
+            loss.append(policy_prob * (policy_log_prob - hindsight_log_prob))
+        
+        loss = torch.stack(loss)
+        return loss.sum()
+    
+    def calculate_hindsight_classifier_loss(self, hindsight_prob_dist, hindsight_log_prob):
+        loss = []
+
+        for action in hindsight_prob_dist.enumerate_support():
+            loss.append(hindsight_log_prob * hindsight_prob_dist.probs[action.item()])
+        
+        loss = torch.stack(loss)
+        return loss.sum()
 
     def calculate_loss(self, gamma=0.99):
         # Initialize the lists and variables
@@ -73,15 +94,19 @@ class ModelHolder():
 
         for t in reversed(range(len(self.rewards))):
             Gt = Gt * gamma + self.rewards[t]
-            policy_log_prob, state_value, hindsight_log_prob = saved_actions[t]
+            state_value, action, policy_action_dist,  hindsight_action_dist = saved_actions[t]
+            policy_log_prob = policy_action_dist.log_prob(action)
             advantage = Gt - state_value.detach().item()
 
             hindsight_baseline_loss.append((state_value[0] - Gt)**2)  # simple MSE loss
             policy_gradient_loss.append(-policy_log_prob * advantage)
 
-            # NOTE: might need to sum over actions
-            action_independence_loss.append(policy_log_prob * (policy_log_prob - hindsight_log_prob)) 
-            hindsight_classifier_loss.append(-hindsight_log_prob)
+            # action_independence_loss.append(policy_log_prob * (policy_log_prob - hindsight_log_prob.detach().item())) 
+            action_independence_loss.append(self.calculate_action_independence_loss(policy_action_dist, hindsight_action_dist))
+
+            hindsight_log_prob = hindsight_action_dist.log_prob(action)
+            hindsight_classifier_loss.append(self.calculate_hindsight_classifier_loss(hindsight_action_dist, hindsight_log_prob))
+            # hindsight_classifier_loss.append(-hindsight_log_prob)
 
         hindsight_baseline_loss = torch.stack(hindsight_baseline_loss).sum()
         hindsight_classifier_loss = torch.stack(hindsight_classifier_loss).sum()
@@ -98,27 +123,20 @@ class ModelHolder():
     def update(self):
         L_hs, L_sup, L_im, L_pg = self.calculate_loss()
 
-        # Optimize VFA (Hindsight Baseline Loss)
         self.vfa_optimizer.zero_grad()
-        L_hs.backward()
-        self.vfa_optimizer.step()
-
-        # Optimize Hindsight Network (Independence Maximization Loss)
         self.policy_optimizer.zero_grad()
         self.hindsight_optimizer.zero_grad()
-        L_im.backward()
-        self.hindsight_optimizer.step()
-        self.policy_optimizer.step()
-
-        # Optimize Hindsight Classifier (Hindsight Predictor Loss)
         self.hs_classifier_optimizer.zero_grad()
-        L_sup.backward()
-        self.hs_classifier_optimizer.step()
 
-        # Optimize Policy (Policy Gradient Loss)
-        self.policy_optimizer.zero_grad()
-        L_pg.backward()
+        L_hs.backward(retain_graph=True)         # Optimize VFA (Hindsight Baseline Loss)
+        L_pg.backward(retain_graph=True)         # Optimize Policy (Policy Gradient Loss)
+        L_im.backward(retain_graph=True)         # Optimize Hindsight Network (Independence Maximization Loss)
+        L_sup.backward()                         # Optimize Hindsight Classifier (Hindsight Predictor Loss)
+
+        self.vfa_optimizer.step()
         self.policy_optimizer.step()
+        self.hindsight_optimizer.step()
+        self.hs_classifier_optimizer.step()
 
         self.clear_memory()
 
@@ -129,6 +147,7 @@ def train(env):
     EWMA_THRESHOLD = -1
 
     model = ModelHolder(env)
+    ewma_reward = 0
     
     for i_episode in range(MAX_EPISODES):
         state = env.reset()
@@ -155,7 +174,6 @@ def train(env):
             print("Solved in Episode {}! Running reward is now {}!".format(i_episode, ewma_reward))
             break
     
-
 def main():
     random_seed = 1
     env = Bandit(K=20, N=10, variance=0.0, seed=random_seed)
