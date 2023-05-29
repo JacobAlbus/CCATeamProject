@@ -153,7 +153,8 @@ def train(env):
         state = env.reset()
         ep_reward = 0
         done = False
-
+        print(state)
+        exit()
         for t in range(MAX_EPISODE_LENGTH):
             action = model.select_action(state, env)
             state, reward, done = env.step(action)

@@ -20,13 +20,12 @@ class Bandit():
       return self.rng.integers(-self.N, self.N + 1).item()
 
    def calculate_feedback(self, A):
-      self.epsilon = self.rng.normal(loc=0, scale=self.variance)
       C = self.prev_context
 
       if A is None:
-         return self.U[:, C + self.N] + self.W * self.epsilon
+         return self.U[:, C + self.N] + (self.W * self.epsilon)
       else:
-         return self.U[:, C + self.N] + self.V[:, A] + self.W * self.epsilon
+         return self.U[:, C + self.N] + self.V[:, A] + (self.W * self.epsilon)
 
    def step(self, action_index):
       action = action_index - self.N  # cast [0, ..., 20] to [-10, ..., 10]
@@ -34,12 +33,14 @@ class Bandit():
       done = True
 
       C = self.sample()
+      self.epsilon = self.rng.normal(loc=0, scale=self.variance)
       self.prev_context = C
 
       return C, min(0, reward), done
 
    def reset(self):
       C = self.sample()
+      self.epsilon = self.rng.normal(loc=0, scale=self.variance)
       self.prev_context = C
       
       return C
