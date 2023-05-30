@@ -6,7 +6,8 @@ from torch.distributions import Categorical
 from collections import namedtuple
 import torch.optim as optim
 
-SavedAction = namedtuple('SavedAction', ['value', 'action', 'policy_log_dist', 'hindsight_log_dist'])
+SavedAction = namedtuple('SavedAction', ['value', 'action', 'hindsight_observation', 
+                                         'policy_log_dist', 'hindsight_log_dist'])
 
 class ModelHolder():
     def __init__(self, env, hidden_size=32, lr_hs=0.001, lr_im=0.001, lr_sup=0.001):
@@ -18,8 +19,8 @@ class ModelHolder():
         self.saved_actions = []
         self.rewards = []
 
-        # self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        # self.device = torch.device("cpu")
 
         self.hindsight_network = GRUNet(input_dim=FEEDBACK_DIM, hidden_dim=32, 
                         output_dim=HINDSIGHT_DIM, n_layers=32, device=self.device).to(self.device)
@@ -37,37 +38,42 @@ class ModelHolder():
     
     def select_action(self, state, env):
         # Use Policy P(a | s) to select action
-        X = torch.tensor(state, dtype=torch.float).unsqueeze(0)
-        action_prob_dist = self.policy(X)
-        action_prob_dist = Categorical(action_prob_dist)
-        action = action_prob_dist.sample()
+        X = torch.tensor(state, dtype=torch.float).unsqueeze(0).to(self.device)
+        policy_action_dist = self.policy(X)
+        policy_action_dist = Categorical(policy_action_dist)
+        action = policy_action_dist.sample()
 
         # Calculate feedback vector and hindsight
-        feedback_vector = torch.from_numpy(env.calculate_feedback(action)).float()
-        # h = self.hindsight_network.init_hidden(feedback_vector.shape[0])
+        feedback_vector = torch.from_numpy(env.calculate_feedback(action)).float().to(self.device)
         h = self.hindsight_network.init_hidden(batch_size=1)
-        hindsight, h = self.hindsight_network(feedback_vector.reshape((1, 1, feedback_vector.size(0))), h)
+        hindsight, h = self.hindsight_network(feedback_vector.reshape((1, 1, feedback_vector. size(0))), h)
         hindsight = hindsight.reshape(hindsight.size(1))
 
         # Calculate state value using hindsight and feedback
         hindsight_observation = torch.cat((hindsight, feedback_vector))
         state_value = self.vfa(hindsight_observation)
 
-        # Find probability of selected action under hindsight classifier P(a | s, psi)
-        hindsight_action_prob_dist = self.hindsight_classifier(hindsight_observation)
-        hindsight_action_prob_dist = Categorical(hindsight_action_prob_dist)
-        # hindsight_log_prob = hindsight_action_prob_dist.log_prob(action)
+        # Get probability distribution of action conditioned on feedback and hindsight
+        # detach hindsight to prevent gradient being applied to hindsight RNN/GRU
+        hindsight_action_dist = self.hindsight_classifier(hindsight_observation.detach())
+        hindsight_action_dist = Categorical(hindsight_action_dist)
 
-        self.saved_actions.append(SavedAction(state_value, action, action_prob_dist, hindsight_action_prob_dist))
+        # save state value, selected action, prob. dist. of action conditioned on obersvation, and 
+        # prob. dist. of action conditioned on feedback and hindsight 
+        self.saved_actions.append(SavedAction(state_value, action, hindsight_observation, policy_action_dist, hindsight_action_dist))
 
         return action.item()
     
-    def calculate_action_independence_loss(self, policy_action_dist, hindsight_action_dist):
-
+    def calculate_action_independence_loss(self, policy_action_dist, hindsight_observation):
+        hindsight_action_dist = self.hindsight_classifier(hindsight_observation)
+        hindsight_action_dist = Categorical(hindsight_action_dist)
         loss = []
+
         for action in policy_action_dist.enumerate_support():
-            policy_prob = policy_action_dist.probs[action.item()]
-            policy_log_prob = policy_action_dist.log_prob(action)
+
+            # detach policy network values to prevent gradient being applied to policy network
+            policy_prob = policy_action_dist.probs[action.item()].detach() 
+            policy_log_prob = policy_action_dist.log_prob(action).detach()
             hindsight_log_prob = hindsight_action_dist.log_prob(action)
             loss.append(policy_prob * (policy_log_prob - hindsight_log_prob))
         
@@ -81,7 +87,7 @@ class ModelHolder():
             loss.append(hindsight_log_prob * hindsight_prob_dist.probs[action.item()])
         
         loss = torch.stack(loss)
-        return loss.sum()
+        return -loss.sum()
 
     def calculate_loss(self, gamma=0.99):
         # Initialize the lists and variables
@@ -94,19 +100,20 @@ class ModelHolder():
 
         for t in reversed(range(len(self.rewards))):
             Gt = Gt * gamma + self.rewards[t]
-            state_value, action, policy_action_dist,  hindsight_action_dist = saved_actions[t]
+            state_value, action, hindsight_observation, policy_action_dist,  hindsight_action_dist = saved_actions[t]
+
             policy_log_prob = policy_action_dist.log_prob(action)
-            advantage = Gt - state_value.detach().item()
 
-            hindsight_baseline_loss.append((state_value[0] - Gt)**2)  # simple MSE loss
-            policy_gradient_loss.append(-policy_log_prob * advantage)
+            # Caluclate MSE baseline loss
+            hindsight_baseline_loss.append((state_value[0] - Gt)**2)
 
-            # action_independence_loss.append(policy_log_prob * (policy_log_prob - hindsight_log_prob.detach().item())) 
-            action_independence_loss.append(self.calculate_action_independence_loss(policy_action_dist, hindsight_action_dist))
+            # Detach state value to prevent gradient being applied to VFA
+            policy_gradient_loss.append(-policy_log_prob * (Gt - state_value.detach().item()))
+
+            action_independence_loss.append(self.calculate_action_independence_loss(policy_action_dist, hindsight_observation))
 
             hindsight_log_prob = hindsight_action_dist.log_prob(action)
             hindsight_classifier_loss.append(self.calculate_hindsight_classifier_loss(hindsight_action_dist, hindsight_log_prob))
-            # hindsight_classifier_loss.append(-hindsight_log_prob)
 
         hindsight_baseline_loss = torch.stack(hindsight_baseline_loss).sum()
         hindsight_classifier_loss = torch.stack(hindsight_classifier_loss).sum()
@@ -124,26 +131,26 @@ class ModelHolder():
         L_hs, L_sup, L_im, L_pg = self.calculate_loss()
 
         self.vfa_optimizer.zero_grad()
-        self.policy_optimizer.zero_grad()
         self.hindsight_optimizer.zero_grad()
         self.hs_classifier_optimizer.zero_grad()
+        self.policy_optimizer.zero_grad()
 
         L_hs.backward(retain_graph=True)         # Optimize VFA (Hindsight Baseline Loss)
-        L_pg.backward(retain_graph=True)         # Optimize Policy (Policy Gradient Loss)
         L_im.backward(retain_graph=True)         # Optimize Hindsight Network (Independence Maximization Loss)
-        L_sup.backward()                         # Optimize Hindsight Classifier (Hindsight Predictor Loss)
+        L_sup.backward(retain_graph=True)        # Optimize Hindsight Classifier (Hindsight Predictor Loss)
+        L_pg.backward()         # Optimize Policy (Policy Gradient Loss)
 
         self.vfa_optimizer.step()
-        self.policy_optimizer.step()
         self.hindsight_optimizer.step()
         self.hs_classifier_optimizer.step()
+        self.policy_optimizer.step()
 
         self.clear_memory()
 
 def train(env):
     MAX_EPISODES = 100000
     MAX_EPISODE_LENGTH = 1000
-    EWMA_MOVE = 0.0005
+    EWMA_MOVE = 0.005
     EWMA_THRESHOLD = -1
 
     model = ModelHolder(env)
@@ -153,8 +160,7 @@ def train(env):
         state = env.reset()
         ep_reward = 0
         done = False
-        print(state)
-        exit()
+
         for t in range(MAX_EPISODE_LENGTH):
             action = model.select_action(state, env)
             state, reward, done = env.step(action)
