@@ -1,3 +1,4 @@
 *.pyc
 /bandit_example/__pycache__
 /CCA_Paper.pdf
+/logs
