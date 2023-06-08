@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
+import PIL
 from enum import IntEnum
 
 class Pixel(IntEnum):
@@ -48,12 +49,12 @@ class GridWorld():
 
 
    # visualize the current configuration via matplotlib
-   def show(self):
+   def show(self, time_step=1):
       fig, axs = plt.subplots(1, 3)
       for i, ax in enumerate(axs):
          room = self.rooms[i][1:-1, 1:-1]
          h, l = room.shape
-         print(room)
+         # print(room)
          for i in range(room.shape[0]):
             for j in range(room.shape[1]):
                if room[(i, j)] == Pixel.EMPTY:
@@ -66,12 +67,15 @@ class GridWorld():
                ax.set_xticks([])
 
       # build legend
-      handles = []
-      for px in Pixel:
-         patch = mlines.Line2D([], [], marker="s", markersize=10, linewidth=0, color=colors[px.value], label=px.name)
-         handles.append(patch)
-      axs[1].legend(handles=handles, ncol=3, loc='lower center', bbox_to_anchor=(0.5, -0.5))
-      plt.show()
+      # handles = []
+      # for px in Pixel:
+      #    patch = mlines.Line2D([], [], marker="s", markersize=10, linewidth=0, color=colors[px.value], label=px.name)
+      #    handles.append(patch)
+      # axs[1].legend(handles=handles, ncol=3, loc='lower center', bbox_to_anchor=(0.5, -0.5))
+      fig.savefig(f"temp/env_image_{time_step}.png")
+      plt.close()
+      # nib = PIL.Image.frombytes('RGB', fig.canvas.get_width_height(),fig.canvas.tostring_rgb())
+      # plt.show()
 
    def sample_rooms(self):
       rooms = []
